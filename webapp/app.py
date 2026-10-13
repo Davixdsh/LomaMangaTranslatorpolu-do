@@ -58,11 +58,11 @@ for folder in (UPLOADS, OUTPUTS, TASKS_DIR):
 
 
 
-MODEL = "translategemma:4b"
+MODEL = "gemini-3.5-flash-lite"
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 
-MAX_LINES_PER_REQUEST = 30
+MAX_LINES_PER_REQUEST = 1
 
 
 
@@ -932,6 +932,176 @@ def save_epub(images, output_path, title):
 
 
 
+
+def analyze_page_with_gemini(image, page_number, context=""):
+    """Reconhece e traduz os textos diretamente da imagem de uma página."""
+    import base64
+    import json
+    import os
+    import re
+    import time
+    import urllib.error
+    import urllib.request
+    from io import BytesIO
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY não está configurada neste terminal."
+        )
+
+    model = "gemini-3.5-flash-lite"
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + model
+        + ":generateContent"
+    )
+
+    # Envia a página inteira, não texto extraído pelo Tesseract.
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=92)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    prompt = """
+Você é um especialista em leitura visual e tradução de mangás.
+Analise a página de imagem enviada e execute as duas tarefas:
+1. Identifique textos legíveis que devam ser traduzidos, especialmente
+   falas dentro de balões e caixas de narração.
+2. Traduza cada texto do inglês para português brasileiro natural.
+
+Regras:
+- Examine a imagem inteira e preserve a ordem de leitura.
+- Não invente palavras que não estejam visíveis.
+- Não inclua letras do cenário, efeitos decorativos ou rabiscos como falas,
+  a menos que sejam texto legível com significado.
+- Preserve nomes de personagens e títulos de obras.
+- Preserve exatamente "Demon Slayer: Kimetsu no Yaiba" e "Kimetsu no Yaiba".
+- Não traduza logotipos, nomes de editoras nem nomes próprios.
+- Cada região deve corresponder a um texto separado.
+- Não junte falas de balões diferentes.
+- Retorne a caixa que envolve o texto original, não a página inteira.
+- As coordenadas devem ser números normalizados de 0 a 1000:
+  [x, y, largura, altura], medidos desde o canto superior esquerdo.
+- Se não houver texto traduzível, retorne uma lista vazia.
+- Não inclua comentários, Markdown nem texto fora do JSON.
+
+Contexto anterior da história:
+""" + (context[-2000:] if context else "(início da história)") + """
+
+Retorne exatamente esta estrutura JSON:
+{
+  "regions": [
+    {
+      "text": "texto original legível",
+      "translation": "tradução brasileira",
+      "box": [100, 200, 300, 100]
+    }
+  ]
+}
+"""
+
+    request_body = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": encoded
+                    }
+                }
+            ]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.1
+        }
+    }
+
+    payload = json.dumps(request_body).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint + "?key=" + api_key,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    raw = None
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code in (429, 500, 502, 503, 504) and attempt < 4:
+                time.sleep(min(5 * (2 ** attempt), 40))
+                continue
+            raise RuntimeError(
+                f"Gemini falhou na página {page_number} "
+                f"(HTTP {exc.code}): {detail[:1200]}"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt < 4:
+                time.sleep(min(5 * (2 ** attempt), 40))
+                continue
+            raise RuntimeError(
+                f"Falha de conexão com Gemini na página {page_number}: {exc}"
+            ) from exc
+
+    if raw is None:
+        raise RuntimeError(
+            f"Gemini não retornou resultado para a página {page_number}."
+        )
+
+    try:
+        answer = raw["candidates"][0]["content"]["parts"][0]["text"].strip()
+        answer = re.sub(r"^```(?:json)?\s*", "", answer, flags=re.I)
+        answer = re.sub(r"\s*```$", "", answer)
+        parsed = json.loads(answer)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Resposta JSON inválida do Gemini na página {page_number}."
+        ) from exc
+
+    width, height = image.size
+    lines = []
+    translations = {}
+
+    for region in parsed.get("regions", []):
+        text = str(region.get("text", "")).strip()
+        translation = str(region.get("translation", "")).strip()
+        box = region.get("box", [])
+
+        if not text or not translation or not isinstance(box, list) or len(box) != 4:
+            continue
+
+        try:
+            bx, by, bw, bh = [float(value) for value in box]
+        except (ValueError, TypeError):
+            continue
+
+        # Coordenadas normalizadas para pixels da imagem original.
+        x = max(0, min(width - 1, round(bx * width / 1000)))
+        y = max(0, min(height - 1, round(by * height / 1000)))
+        w = max(1, min(width - x, round(bw * width / 1000)))
+        h = max(1, min(height - y, round(bh * height / 1000)))
+
+        item_id = len(lines) + 1
+        lines.append({
+            "id": item_id,
+            "page": page_number,
+            "text": text,
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h
+        })
+        translations[item_id] = translation
+
+    return lines, translations
+
+
 def process_job(task_id):
 
     task = get_task(task_id)
@@ -1001,90 +1171,41 @@ def process_job(task_id):
 
 
         rendered = []
-
         context = ""
 
-        for start in range(0, total, batch_size):
-
-            page_batch = images[start:start + batch_size]
-
-            all_lines = []
-
-
-
-            for offset, image in enumerate(page_batch):
-
-                page_number = start + offset + 1
-
-                lines = extract_lines(image, page_number)
-
-                for line in lines:
-
-                    line["id"] = len(all_lines) + 1
-
-                    all_lines.append(line)
-
-
+        for page_index, image in enumerate(images):
+            page_number = page_index + 1
 
             update_task(
-
                 task_id,
-
-                message=f"Reconhecendo e traduzindo páginas {start + 1}–{min(start + batch_size, total)}...",
-
+                current=page_index,
+                percent=int(page_index * 100 / max(total, 1)),
+                message=f"Gemini analisando e traduzindo página {page_number} de {total}...",
             )
 
+            lines, translations = analyze_page_with_gemini(
+                image,
+                page_number,
+                context=context
+            )
 
+            rendered.append(render_page(image, lines, translations))
 
-            translations = translate_batch(all_lines, context=context)
-
-            for image in page_batch:
-
-                page_lines = [
-
-                    line for line in all_lines
-
-                    if line["page"] == start + page_batch.index(image) + 1
-
-                ]
-
-                rendered.append(render_page(image, page_lines, translations))
-
-
-
-            if all_lines:
-
+            if lines:
                 context = (
-
                     context + "\n" +
-
                     "\n".join(
-
                         f"{line['text']} → {translations.get(line['id'], '')}"
-
-                        for line in all_lines
-
+                        for line in lines
                     )
-
                 )[-3500:]
 
-
-
-            current = min(start + len(page_batch), total)
-
             update_task(
-
                 task_id,
-
-                current=current,
-
-                percent=int(current * 100 / max(total, 1)),
-
-                message=f"Traduzindo páginas: {current} de {total}",
-
+                current=page_number,
+                percent=int(page_number * 100 / max(total, 1)),
+                message=f"Página concluída: {page_number} de {total}",
             )
-
-
 
         update_task(task_id, message="Montando arquivo final...")
 
