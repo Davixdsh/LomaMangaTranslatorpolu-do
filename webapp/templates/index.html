@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LomaMangaTranslator</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#100d1b;color:#f5f1ff;font-family:system-ui,-apple-system,sans-serif}
+main{max-width:850px;margin:auto;padding:22px 15px 50px}
+h1{font-size:27px;margin-bottom:6px}
+.sub{color:#bcb2d4;margin-top:0}
+.card{background:#1d172c;border:1px solid #39304d;border-radius:17px;padding:18px;margin:16px 0}
+label{display:block;margin:14px 0 7px;font-weight:650}
+input,select,button{width:100%;padding:12px;border-radius:10px;border:1px solid #55466e;background:#110d1c;color:#fff;font-size:15px}
+button{background:#9c68f5;border:0;font-weight:750;cursor:pointer;margin-top:16px}
+button:disabled{opacity:.55;cursor:wait}
+.small{font-size:13px;color:#bcb2d4;line-height:1.5}
+.row{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.badge{border-radius:999px;padding:5px 9px;font-size:12px;font-weight:700;white-space:nowrap}
+.queued{background:#473a60;color:#e6d7ff}
+.processing{background:#59441e;color:#ffe1a1}
+.done{background:#174b39;color:#b8ffe0}
+.error{background:#59282f;color:#ffc4c9}
+.progress{height:8px;background:#332844;border-radius:99px;overflow:hidden;margin:10px 0}
+.bar{height:100%;width:0;background:#b28aff;transition:width .25s}
+.task{border-top:1px solid #39304d;padding:15px 0}
+.task:first-child{border-top:0}
+.task h3{font-size:16px;margin:0 0 8px;overflow-wrap:anywhere}
+.task p{margin:5px 0;color:#c6bdd8;font-size:13px;line-height:1.45}
+.download{display:inline-block;color:#d9c4ff;margin-top:9px;font-weight:700}
+.error-text{color:#ffb9c0!important}
+.empty{color:#bcb2d4;text-align:center;padding:22px 0}
+#notice{white-space:pre-wrap;color:#e4d6ff;font-size:14px}
+</style>
+</head>
+<body>
+<main>
+  <h1>📚 LomaMangaTranslator</h1>
+  <p class="sub">Traduza mangás e acompanhe todas as tarefas em um só lugar.</p>
+
+  <section class="card">
+    <h2>Nova tradução</h2>
+    <form id="form">
+      <label for="file">Arquivo PDF ou EPUB</label>
+      <input id="file" name="file" type="file" accept=".pdf,.epub" required>
+
+      <label for="format">Formato final</label>
+      <select id="format" name="output_format">
+        <option value="pdf">PDF</option>
+        <option value="epub">EPUB</option>
+      </select>
+
+      <label for="batch">Páginas por lote</label>
+      <select id="batch" name="batch_size">
+        <option value="1">1 página — menor uso de memória</option>
+        <option value="2">2 páginas — pode ser mais rápido</option>
+      </select>
+
+      <p class="small">As tarefas são executadas em fila, na ordem em que forem enviadas. Você pode sair desta página e voltar depois para acompanhar.</p>
+      <button id="submit" type="submit">Adicionar à fila</button>
+      <p id="notice"></p>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <h2>Suas traduções</h2>
+      <button id="refresh" type="button" style="width:auto;margin:0;padding:9px 13px">Atualizar</button>
+    </div>
+    <p class="small">O painel atualiza automaticamente. Traduções concluídas continuam aqui para baixar.</p>
+    <div id="tasks"><div class="empty">Carregando tarefas...</div></div>
+  </section>
+</main>
+
+<script>
+const form = document.getElementById('form');
+const submitButton = document.getElementById('submit');
+const notice = document.getElementById('notice');
+const tasksElement = document.getElementById('tasks');
+
+const statusLabels = {
+  queued: 'Na fila',
+  processing: 'Em andamento',
+  done: 'Concluída',
+  error: 'Falhou'
+};
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  })[c]);
+}
+
+function taskCard(task) {
+  const status = task.status || 'queued';
+  const percent = Math.max(0, Math.min(100, Number(task.percent || 0)));
+  const progressText = task.total
+    ? `${task.current || 0} de ${task.total} páginas`
+    : (status === 'queued' ? 'Aguardando sua vez' : 'Preparando páginas');
+
+  let actions = '';
+  if (status === 'done') {
+    actions = `<a class="download" href="/api/download/${encodeURIComponent(task.id)}">⬇ Baixar arquivo traduzido</a>`;
+  }
+  if (status === 'error') {
+    actions = `<p class="error-text">Erro: ${escapeHTML(task.error || task.message || 'Falha desconhecida')}</p>`;
+  }
+  if (status === 'done' || status === 'error') {
+    actions += `<button type="button" data-delete="${escapeHTML(task.id)}" style="width:auto;margin-top:10px;padding:8px 12px;background:#433653">Remover do histórico</button>`;
+  }
+
+  return `
+    <article class="task">
+      <div class="row">
+        <h3>${escapeHTML(task.name)}</h3>
+        <span class="badge ${escapeHTML(status)}">${escapeHTML(statusLabels[status] || status)}</span>
+      </div>
+      <p>${escapeHTML(task.message || '')}</p>
+      <div class="progress"><div class="bar" style="width:${percent}%"></div></div>
+      <div class="row">
+        <p>${escapeHTML(progressText)}</p>
+        <p>${percent}%</p>
+      </div>
+      <p>Formato: ${escapeHTML((task.output_format || 'pdf').toUpperCase())}</p>
+      ${actions}
+    </article>`;
+}
+
+async function refreshTasks() {
+  try {
+    const response = await fetch('/api/tasks', {cache:'no-store'});
+    if (!response.ok) throw new Error('Não foi possível consultar as tarefas.');
+    const data = await response.json();
+    const tasks = data.tasks || [];
+    tasks.sort((a,b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
+    if (!tasks.length) {
+      tasksElement.innerHTML = '<div class="empty">Nenhuma tradução enviada ainda.</div>';
+    } else {
+      tasksElement.innerHTML = tasks.map(taskCard).join('');
+    }
+  } catch (error) {
+    tasksElement.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+  }
+}
+
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!document.getElementById('file').files.length) return;
+
+  submitButton.disabled = true;
+  notice.textContent = 'Enviando arquivo e adicionando à fila...';
+
+  try {
+    const data = new FormData(form);
+    const response = await fetch('/api/translate', {method:'POST', body:data});
+    const result = await response.json();
+
+    if (!response.ok) throw new Error(result.detail || 'Não foi possível enviar o arquivo.');
+
+    notice.textContent = 'Arquivo adicionado à fila! Você pode sair do site e voltar depois.';
+    form.reset();
+    await refreshTasks();
+  } catch (error) {
+    notice.textContent = 'Erro: ' + error.message;
+  } finally {
+    submitButton.disabled = false;
+  }
+});
+
+tasksElement.addEventListener('click', async event => {
+  const button = event.target.closest('[data-delete]');
+  if (!button) return;
+
+  if (!confirm('Remover esta tarefa do histórico e apagar seus arquivos?')) return;
+  button.disabled = true;
+
+  try {
+    const response = await fetch('/api/tasks/' + encodeURIComponent(button.dataset.delete), {method:'DELETE'});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'Não foi possível remover.');
+    await refreshTasks();
+  } catch (error) {
+    alert(error.message);
+    button.disabled = false;
+  }
+});
+
+document.getElementById('refresh').addEventListener('click', refreshTasks);
+refreshTasks();
+setInterval(refreshTasks, 2500);
+</script>
+</body>
+</html>

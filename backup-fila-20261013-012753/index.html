@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LomaMangaTranslator</title>
+<style>
+body{font-family:system-ui;background:#101018;color:#f5f5f7;margin:0;padding:20px}
+main{max-width:520px;margin:30px auto;background:#1d1d29;padding:24px;border-radius:18px}
+h1{color:#d9b7ff}
+p{color:#d0ceda;line-height:1.5}
+input,select,button{box-sizing:border-box;width:100%;margin-top:14px;padding:14px;border-radius:10px}
+input,select{background:#292938;color:white;border:1px solid #555}
+button{background:#b58aff;color:#171020;border:0;font-weight:bold}
+button:disabled{opacity:.5}
+progress{width:100%;height:22px;margin-top:20px;accent-color:#b58aff}
+#percent{font-size:24px;color:#d9b7ff;font-weight:bold}
+#status{overflow-wrap:anywhere;margin-top:12px}
+a{color:#d9b7ff}
+</style>
+</head>
+<body>
+<main>
+<h1>📚 LomaMangaTranslator</h1>
+<p>Envie seu mangá, traduza as páginas e escolha o formato final.</p>
+<form id="form">
+<label for="file">Mangá original (PDF ou EPUB)</label>
+<input id="file" name="file" type="file" accept=".pdf,.epub" required>
+
+<label for="format">Formato para baixar</label>
+<select id="format" name="output_format">
+<option value="epub">EPUB — leitura digital / Kindle</option>
+<option value="pdf">PDF — páginas fixas</option>
+</select>
+
+<button id="submit" type="submit">Traduzir mangá</button>
+</form>
+<progress id="bar" value="0" max="100" hidden></progress>
+<div id="percent"></div>
+<div id="status" role="status" aria-live="polite"></div>
+<div id="download"></div>
+</main>
+<script>
+const form=document.querySelector("#form");
+const file=document.querySelector("#file");
+const format=document.querySelector("#format");
+const button=document.querySelector("#submit");
+const bar=document.querySelector("#bar");
+const percent=document.querySelector("#percent");
+const status=document.querySelector("#status");
+const download=document.querySelector("#download");
+
+form.addEventListener("submit",async e=>{
+  e.preventDefault();
+  if(!file.files.length)return;
+
+  button.disabled=true;
+  bar.hidden=false;
+  bar.value=0;
+  percent.textContent="0%";
+  download.replaceChildren();
+  status.textContent="Enviando arquivo...";
+
+  try{
+    const data=new FormData();
+    data.append("file",file.files[0]);
+    data.append("output_format",format.value);
+
+    const response=await fetch("/api/translate",{method:"POST",body:data});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result.detail||"Falha ao enviar arquivo.");
+
+    while(true){
+      await new Promise(resolve=>setTimeout(resolve,1200));
+      const r=await fetch("/api/progress/"+encodeURIComponent(result.job_id));
+      const job=await r.json();
+      if(!r.ok)throw new Error(job.detail||"Erro ao consultar progresso.");
+
+      bar.value=job.percent||0;
+      percent.textContent=(job.percent||0)+"%";
+      status.textContent=job.message||"Processando...";
+
+      if(job.status==="done"){
+        const a=document.createElement("a");
+        a.href=job.download;
+        a.textContent="Baixar mangá traduzido";
+        download.replaceChildren(a);
+        break;
+      }
+      if(job.status==="error")throw new Error(job.message);
+    }
+  }catch(err){
+    status.textContent="Erro: "+(err.message||String(err));
+  }finally{
+    button.disabled=false;
+  }
+});
+</script>
+</body>
+</html>

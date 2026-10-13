@@ -1,0 +1,194 @@
+from pathlib import Path
+from uuid import uuid4
+import threading
+import requests
+import io
+import pytesseract
+from PIL import Image
+import pymupdf
+import ebooklib
+from ebooklib import epub
+from bs4 import BeautifulSoup
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi.responses import HTMLResponse, FileResponse
+
+BASE = Path(__file__).resolve().parent
+UPLOADS = BASE / "uploads"
+OUTPUT = BASE / "output"
+UPLOADS.mkdir(exist_ok=True)
+OUTPUT.mkdir(exist_ok=True)
+
+app = FastAPI(title="LomaMangaTranslator")
+jobs = {}
+lock = threading.Lock()
+
+def update(job_id, **values):
+    with lock:
+        jobs[job_id].update(values)
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return (BASE / "templates" / "index.html").read_text(encoding="utf-8")
+
+def extract_pdf(path):
+    sections = []
+    with pymupdf.open(path) as doc:
+        total = len(doc)
+        for i, page in enumerate(doc):
+            text = page.get_text().strip()
+
+            if not text:
+                pix = page.get_pixmap(dpi=200)
+                image = Image.open(io.BytesIO(pix.tobytes("png")))
+                text = pytesseract.image_to_string(
+                    image,
+                    lang="eng",
+                    config="--psm 11"
+                ).strip()
+
+            if text:
+                sections.append((f"Página {i + 1}", text))
+
+    return sections
+
+def extract_epub(path):
+    book = epub.read_epub(path)
+    sections = []
+    for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+        soup = BeautifulSoup(item.get_content(), "html.parser")
+        text = soup.get_text(" ", strip=True)
+        if text:
+            sections.append((item.get_name(), text))
+    return sections
+
+def translate(text):
+    response = requests.post(
+        "http://127.0.0.1:11434/api/generate",
+        json={
+            "model": "translategemma:4b",
+            "prompt": (
+                "Traduza para português brasileiro natural. "
+                "Preserve nomes próprios, diálogos e o sentido original. "
+                "Responda somente com a tradução.\n\n" + text
+            ),
+            "stream": False
+        },
+        timeout=600
+    )
+    response.raise_for_status()
+    return response.json()["response"].strip()
+
+def process_job(job_id, source, name, ext):
+    try:
+        update(job_id, status="processing", message="Lendo o arquivo...")
+        sections = extract_pdf(source) if ext == ".pdf" else extract_epub(source)
+
+        if not sections:
+            raise ValueError(
+                "Nenhum texto extraível. O arquivo pode ser um mangá escaneado; "
+                "é necessário OCR para ler as páginas como imagens."
+            )
+
+        units = []
+        for title, content in sections:
+            chunks = [
+                content[i:i + 2500]
+                for i in range(0, len(content), 2500)
+            ]
+            for chunk in chunks:
+                units.append((title, chunk))
+
+        total = len(units)
+        translated = []
+
+        update(
+            job_id,
+            total=total,
+            current=0,
+            percent=0,
+            message=f"Preparado: {total} blocos para traduzir."
+        )
+
+        last_title = None
+        for index, (title, chunk) in enumerate(units, start=1):
+            if title != last_title:
+                translated.append(f"\n\n===== {title} =====\n\n")
+                last_title = title
+
+            update(
+                job_id,
+                current=index,
+                percent=int((index - 1) * 100 / total),
+                message=f"Traduzindo bloco {index} de {total} — {title}"
+            )
+            translated.append(translate(chunk) + "\n")
+
+            update(
+                job_id,
+                current=index,
+                percent=int(index * 100 / total),
+                message=f"Concluído: {index} de {total} blocos."
+            )
+
+        output = OUTPUT / f"{Path(name).stem}_ptbr.txt"
+        output.write_text("".join(translated), encoding="utf-8")
+
+        update(
+            job_id,
+            status="done",
+            percent=100,
+            message="Tradução concluída!",
+            download=f"/api/download/{output.name}"
+        )
+
+    except Exception as exc:
+        update(job_id, status="error", message=str(exc))
+    finally:
+        source.unlink(missing_ok=True)
+
+@app.post("/api/translate")
+def translate_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...)
+):
+    name = Path(file.filename or "arquivo").name
+    ext = Path(name).suffix.lower()
+
+    if ext not in {".pdf", ".epub"}:
+        raise HTTPException(400, "Envie um arquivo PDF ou EPUB.")
+
+    job_id = uuid4().hex
+    source = UPLOADS / f"{job_id}{ext}"
+
+    with source.open("wb") as out:
+        while chunk := file.file.read(1024 * 1024):
+            out.write(chunk)
+
+    with lock:
+        jobs[job_id] = {
+            "status": "queued",
+            "current": 0,
+            "total": 0,
+            "percent": 0,
+            "message": "Arquivo recebido; aguardando processamento."
+        }
+
+    background_tasks.add_task(process_job, job_id, source, name, ext)
+    return {"job_id": job_id}
+
+@app.get("/api/progress/{job_id}")
+def progress(job_id: str):
+    with lock:
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "Processamento não encontrado.")
+        return dict(job)
+
+@app.get("/api/download/{filename}")
+def download(filename: str):
+    if Path(filename).name != filename:
+        raise HTTPException(400, "Nome de arquivo inválido.")
+    path = OUTPUT / filename
+    if not path.is_file():
+        raise HTTPException(404, "Arquivo não encontrado.")
+    return FileResponse(path, filename=filename)

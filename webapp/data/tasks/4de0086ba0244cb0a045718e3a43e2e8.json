@@ -1,0 +1,15 @@
+{
+  "id": "4de0086ba0244cb0a045718e3a43e2e8",
+  "name": "Demon Slayer Kimetsu no Yaiba vol 1 6 a 21.pdf",
+  "input_path": "/workspaces/LomaMangaTranslator/webapp/data/uploads/4de0086ba0244cb0a045718e3a43e2e8.pdf",
+  "output_format": "pdf",
+  "batch_size": 2,
+  "status": "error",
+  "message": "A tradução falhou.",
+  "current": 0,
+  "total": 16,
+  "percent": 0,
+  "error": "Falha ao comunicar com o Ollama. Verifique se ele está rodando. Detalhes: <urlopen error [Errno 111] Connection refused>",
+  "created_at": "2026-10-13T01:31:30.737898+00:00",
+  "updated_at": "2026-10-13T07:13:50.990108+00:00"
+}
