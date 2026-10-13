@@ -1,0 +1,15 @@
+{
+  "id": "18902e88e1584443ad5afc74f5999d54",
+  "name": "Demon Slayer Kimetsu no Yaiba vol 1 6 a 21.pdf",
+  "input_path": "/workspaces/LomaMangaTranslator/webapp/data/uploads/18902e88e1584443ad5afc74f5999d54.pdf",
+  "output_format": "pdf",
+  "batch_size": 2,
+  "status": "error",
+  "message": "A tradução falhou.",
+  "current": 6,
+  "total": 16,
+  "percent": 37,
+  "error": "Erro na API Gemini (HTTP 503): {\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\",\n    \"status\": \"UNAVAILABLE\"\n  }\n}\n",
+  "created_at": "2026-10-13T17:33:09.516371+00:00",
+  "updated_at": "2026-10-13T17:37:39.637337+00:00"
+}

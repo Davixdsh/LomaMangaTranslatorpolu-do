@@ -731,114 +731,105 @@ def extract_lines(image, page_number):
 
 
 
+def _wrap_text(draw, text, font, max_width):
+    """Quebra o texto sem deixar palavras ultrapassarem a largura."""
+    rows = []
+    current = ""
+
+    for word in text.split():
+        candidate = f"{current} {word}".strip()
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            current = candidate
+            continue
+
+        if current:
+            rows.append(current)
+            current = ""
+
+        piece = ""
+        for char in word:
+            candidate_piece = piece + char
+            if piece and draw.textbbox(
+                (0, 0), candidate_piece, font=font
+            )[2] > max_width:
+                rows.append(piece)
+                piece = char
+            else:
+                piece = candidate_piece
+        current = piece
+
+    if current:
+        rows.append(current)
+
+    return rows or [""]
+
+
 def fit_font(draw, text, width, height):
-
+    """Procura uma fonte que acomode o texto na caixa estimada."""
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-
     if not os.path.exists(font_path):
+        font_path = (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"
+        )
 
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"
+    max_width = max(int(width * 2), 30)
+    max_height = max(int(height * 2), 24)
+    initial_size = min(22, max(8, int(height * 1.4)))
 
-
-
-    size = max(8, min(22, height))
-
-    while size > 7:
-
+    for size in range(initial_size, 6, -1):
         font = ImageFont.truetype(font_path, size)
+        rows = _wrap_text(draw, text, font, max_width)
+        line_height = max(9, int(size * 1.25))
 
-        box = draw.textbbox((0, 0), text, font=font)
+        if len(rows) * line_height <= max_height:
+            return font, rows, line_height, max_width, max_height
 
-        if box[2] - box[0] <= max(width * 2, 20) and box[3] - box[1] <= max(height * 2, 16):
-
-            return font
-
-        size -= 1
-
-    return ImageFont.truetype(font_path, 8)
-
-
-
+    font = ImageFont.truetype(font_path, 7)
+    rows = _wrap_text(draw, text, font, max_width)
+    return font, rows, 9, max_width, max_height
 
 
 def render_page(image, lines, translations):
-
     image = image.copy().convert("RGB")
-
     draw = ImageDraw.Draw(image)
 
-
-
     for line in lines:
-
         translated = translations.get(line["id"], "").strip()
-
         if not translated:
-
             continue
 
-
-
-        x, y, w, h = line["x"], line["y"], line["w"], line["h"]
-
+        x, y, w, h = (
+            line["x"], line["y"], line["w"], line["h"]
+        )
         pad = 3
 
-        # Limpa somente a região identificada pelo OCR.
-
         draw.rectangle(
-
-            (max(0, x - pad), max(0, y - pad), min(image.width, x + w + pad), min(image.height, y + h + pad)),
-
+            (
+                max(0, x - pad),
+                max(0, y - pad),
+                min(image.width, x + w + pad),
+                min(image.height, y + h + pad),
+            ),
             fill="white",
-
         )
 
-        font = fit_font(draw, translated, w, h)
+        font, rows, line_height, max_width, max_height = fit_font(
+            draw, translated, w, h
+        )
 
+        # Desenha todas as linhas que cabem no espaço estimado.
+        for index, row in enumerate(rows):
+            row_width = draw.textbbox((0, 0), row, font=font)[2]
+            draw_y = y + index * line_height
 
+            if row_width > max_width:
+                continue
+            if draw_y + line_height > y + max_height:
+                break
 
-        # Quebra simples de texto para reduzir sobreposição.
-
-        words = translated.split()
-
-        rows, current = [], ""
-
-        max_width = max(w * 2, 30)
-
-        for word in words:
-
-            candidate = f"{current} {word}".strip()
-
-            if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
-
-                current = candidate
-
-            else:
-
-                if current:
-
-                    rows.append(current)
-
-                current = word
-
-        if current:
-
-            rows.append(current)
-
-
-
-        line_height = max(9, int(h * 1.15))
-
-        for index, row in enumerate(rows[:4]):
-
-            draw.text((x, y + index * line_height), row, fill="black", font=font)
-
-
+            draw.text((x, draw_y), row, fill="black", font=font)
 
     return image
-
-
-
 
 
 def save_pdf(images, output_path):
