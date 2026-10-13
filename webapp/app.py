@@ -386,6 +386,15 @@ Traduza do inglês para português brasileiro natural.
 
 Preserve nomes próprios, personalidade, tom, humor e sentido.
 
+REGRAS IMPORTANTES:
+- Não traduza títulos de obras, logotipos, nomes de editoras ou nomes próprios.
+- Preserve exatamente "Demon Slayer: Kimetsu no Yaiba" e "Kimetsu no Yaiba".
+- Não transforme nomes japoneses em palavras traduzidas.
+- Traduza apenas o texto original que realmente contém uma fala ou texto legível.
+- Não invente palavras para completar trechos que não estejam visíveis.
+- Traduza integralmente cada texto fornecido, sem omitir palavras ou frases.
+- Mantenha cada ID e devolva uma tradução para cada item recebido.
+
 Não invente falas nem acrescente explicações.
 
 Cada tradução deve corresponder ao ID da fala original.
@@ -623,100 +632,100 @@ def epub_images(path):
 
 
 def extract_lines(image, page_number):
+    """OCR com ampliação e filtro conservador contra ruídos."""
+    from PIL import ImageOps, ImageEnhance
+
+    scale = 2
+    gray = image.convert("L")
+    gray = ImageOps.autocontrast(gray)
+    gray = ImageEnhance.Contrast(gray).enhance(1.25)
+    enlarged = gray.resize(
+        (gray.width * scale, gray.height * scale),
+        Image.Resampling.LANCZOS,
+    )
 
     data = pytesseract.image_to_data(
-
-        image,
-
+        enlarged,
         lang="eng",
-
-        config="--psm 11",
-
+        config="--oem 3 --psm 11",
         output_type=Output.DICT,
-
     )
 
     lines = {}
-
     count = len(data["text"])
 
+    # Palavras curtas comuns em diálogos ingleses e mangás.
+    short_words = {
+        "i", "a", "am", "an", "as", "at", "be", "by", "do", "go",
+        "he", "if", "in", "is", "it", "me", "my", "no", "of", "oh",
+        "ok", "on", "or", "so", "to", "up", "us", "we", "ya", "ah",
+        "um", "uh", "hm", "ha", "oi"
+    }
 
+    import re
 
     for i in range(count):
-
         text = data["text"][i].strip()
-
-        try:
-
-            confidence = float(data["conf"][i])
-
-        except (ValueError, TypeError):
-
-            confidence = -1
-
-
-
-        if not text or confidence < 35:
-
+        if not text:
             continue
 
+        try:
+            confidence = float(data["conf"][i])
+        except (ValueError, TypeError):
+            continue
 
+        # Descarta reconhecimentos muito incertos.
+        if confidence < 38:
+            continue
+
+        normalized = re.sub(r"[^A-Za-z0-9']", "", text)
+        if not normalized:
+            continue
+
+        word = normalized.lower()
+
+        # Letras soltas e palavras de duas letras exigem mais confiança,
+        # mas palavras legítimas comuns continuam sendo aceitas.
+        if len(word) == 1 and word not in {"i", "a"} and confidence < 75:
+            continue
+        if len(word) == 2 and word not in short_words and confidence < 58:
+            continue
+
+        x = int(data["left"][i] / scale)
+        y = int(data["top"][i] / scale)
+        w = max(1, round(data["width"][i] / scale))
+        h = max(1, round(data["height"][i] / scale))
+
+        # Ignora marcas minúsculas, sem eliminar palavras pequenas apenas
+        # por terem poucas letras.
+        if w < 3 or h < 3:
+            continue
 
         key = (
-
             data["block_num"][i],
-
             data["par_num"][i],
-
             data["line_num"][i],
-
         )
 
-        x = int(data["left"][i])
-
-        y = int(data["top"][i])
-
-        w = int(data["width"][i])
-
-        h = int(data["height"][i])
-
-
-
         if key not in lines:
-
             lines[key] = {
-
                 "text": text,
-
                 "x": x,
-
                 "y": y,
-
                 "w": w,
-
                 "h": h,
-
                 "page": page_number,
-
             }
-
         else:
-
             item = lines[key]
-
             item["text"] += " " + text
-
-            x1, y1 = min(item["x"], x), min(item["y"], y)
-
+            x1 = min(item["x"], x)
+            y1 = min(item["y"], y)
             x2 = max(item["x"] + item["w"], x + w)
-
             y2 = max(item["y"] + item["h"], y + h)
+            item.update(x=x1, y=y1, w=x2-x1, h=y2-y1)
 
-            item.update(x=x1, y=y1, w=x2 - x1, h=y2 - y1)
-
-
-
-    return sorted(lines.values(), key=lambda x: (x["y"], x["x"]))
+    return sorted(lines.values(), key=lambda item: (item["y"], item["x"]))
 
 
 
