@@ -1,0 +1,16 @@
+{
+  "id": "f1718b95eb9b4ca0a1a24270449eb612",
+  "name": "Demon Slayer Kimetsu no Yaiba vol 1 6 a 21.pdf",
+  "input_path": "/workspaces/LomaMangaTranslator/webapp/data/uploads/f1718b95eb9b4ca0a1a24270449eb612.pdf",
+  "output_format": "pdf",
+  "batch_size": 2,
+  "status": "done",
+  "message": "Tradução concluída! O arquivo está disponível para baixar.",
+  "current": 16,
+  "total": 16,
+  "percent": 100,
+  "error": "",
+  "created_at": "2026-10-14T01:29:53.152190+00:00",
+  "updated_at": "2026-10-14T01:50:52.707346+00:00",
+  "output_path": "/workspaces/LomaMangaTranslator/webapp/data/outputs/f1718b95eb9b4ca0a1a24270449eb612.pdf"
+}

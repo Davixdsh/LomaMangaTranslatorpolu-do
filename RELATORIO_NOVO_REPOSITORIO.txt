@@ -1,0 +1,85 @@
+===== USO DE OCR, OLLAMA E GEMINI =====
+27: import pytesseract
+37: from pytesseract import Output
+61: MODEL = "gemini-3.5-flash-lite"
+63: OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+227: def ollama_generate_ollama(prompt):
+241: OLLAMA_URL,
+252: f"Falha ao comunicar com o Ollama. Verifique se ele está rodando. Detalhes: {exc}"
+255: def ollama_generate(prompt):
+256: """Usa Gemini quando configurado; caso contrário, usa Ollama."""
+262: api_key = os.getenv("GEMINI_API_KEY")
+264: return ollama_generate_ollama(prompt)
+266: model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+268: "https://generativelanguage.googleapis.com/v1beta/models/"
+316: f"Erro na API Gemini (HTTP {exc.code}): {details[:1200]}"
+323: f"Gemini limitou a requisição (HTTP {exc.code}). "
+330: f"Falha ao comunicar com a API Gemini: {exc}"
+334: raise RuntimeError("Gemini não respondeu após várias tentativas.")
+340: "Gemini não retornou texto. "
+351: raise RuntimeError("Gemini retornou uma resposta vazia.")
+359: def translate_batch(records, context=""):
+424: raw = ollama_generate(prompt)
+492: answer = ollama_generate(single_prompt).strip()
+554: retry = json.loads(ollama_generate(retry_prompt))
+647: data = pytesseract.image_to_data(
+651: output_type=Output.DICT,
+838: # nos cantos. A caixa precisa ter sido identificada pelo Gemini.
+990: def analyze_page_with_gemini(image, page_number, context=""):
+1001: api_key = os.environ.get("GEMINI_API_KEY")
+1004: "GEMINI_API_KEY não está configurada neste terminal."
+1007: model = "gemini-3.5-flash-lite"
+1009: "https://generativelanguage.googleapis.com/v1beta/models/"
+1103: f"Gemini falhou na página {page_number} "
+1111: f"Falha de conexão com Gemini na página {page_number}: {exc}"
+1116: f"Gemini não retornou resultado para a página {page_number}."
+1126: f"Resposta JSON inválida do Gemini na página {page_number}."
+1272: message=f"Gemini analisando e traduzindo página {page_number} de {total}...",
+1275: lines, translations = analyze_page_with_gemini(
+
+===== DEPENDÊNCIAS DE UPLOAD =====
+31: from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+1431: file: UploadFile = File(...),
+1433: output_format: str = Form("pdf"),
+1435: batch_size: int = Form(1),
+
+===== ARQUIVOS REFERENCIADOS PELO HTML =====
+105: actions = `<a class="download" href="/api/download/${encodeURIComponent(task.id)}">⬇ Baixar arquivo traduzido</a>`;
+133: const response = await fetch('/api/tasks', {cache:'no-store'});
+158: const response = await fetch('/api/translate', {method:'POST', body:data});
+181: const response = await fetch('/api/tasks/' + encodeURIComponent(button.dataset.delete), {method:'DELETE'});
+
+===== CONFIGURAÇÃO DE DIRETÓRIOS =====
+35: from PIL import Image, ImageDraw, ImageFont
+36: 
+37: from pytesseract import Output
+38: 
+39: 
+40: 
+41: BASE = Path(__file__).resolve().parent
+42: 
+43: DATA = BASE / "data"
+44: 
+45: UPLOADS = DATA / "uploads"
+46: 
+47: OUTPUTS = DATA / "outputs"
+48: 
+49: TASKS_DIR = DATA / "tasks"
+50: 
+51: TEMPLATE = BASE / "templates" / "index.html"
+52: 
+53: 
+54: 
+55: for folder in (UPLOADS, OUTPUTS, TASKS_DIR):
+56: 
+57:     folder.mkdir(parents=True, exist_ok=True)
+58: 
+59: 
+60: 
+61: MODEL = "gemini-3.5-flash-lite"
+62: 
+63: OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+64: 
+65: MAX_LINES_PER_REQUEST = 1
+
+===== FIM DO RELATÓRIO =====

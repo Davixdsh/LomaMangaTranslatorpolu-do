@@ -765,89 +765,103 @@ def _wrap_text(draw, text, font, max_width):
 
 
 
+
 def fit_font(draw, text, width, height):
-    """Ajusta a fonte para caber dentro da área disponível."""
+    """Ajusta o texto estritamente ao espaço disponível."""
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     if not os.path.exists(font_path):
         font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"
 
     width = max(1, int(width))
     height = max(1, int(height))
-    max_width = max(1, int(width * 0.90))
-    max_height = max(1, int(height * 0.90))
-    initial_size = max(6, min(22, int(height * 0.65)))
+    max_width = max(1, int(width * 0.82))
+    max_height = max(1, int(height * 0.82))
+    start = max(6, min(22, int(height * 0.55)))
 
-    for size in range(initial_size, 5, -1):
+    for size in range(start, 5, -1):
         font = ImageFont.truetype(font_path, size)
         rows = _wrap_text(draw, text, font, max_width)
-        line_height = max(7, int(size * 1.20))
+        line_height = max(7, int(size * 1.15))
         if rows and len(rows) * line_height <= max_height:
             if all(
-                draw.textbbox((0, 0), row, font=font)[2]
-                <= max_width
+                draw.textbbox((0, 0), row, font=font)[2] <= max_width
                 for row in rows
             ):
                 return font, rows, line_height, max_width, max_height
 
     font = ImageFont.truetype(font_path, 6)
     rows = _wrap_text(draw, text, font, max_width)
-    line_height = 7
-    return font, rows, line_height, max_width, max_height
+    return font, rows, 7, max_width, max_height
+
+
 
 
 
 
 def render_page(image, lines, translations):
-    """Desenha cada tradução dentro da área detectada, sem ampliar a caixa."""
+    """Desenha dentro da caixa validada, sem deslocar nem ampliar regiões."""
     image = image.copy().convert("RGB")
     draw = ImageDraw.Draw(image)
 
-    # As caixas recebidas do Gemini devem representar a área interna
-    # do balão ou da caixa de narração, e não somente as letras originais.
     for line in lines:
         translated = str(translations.get(line["id"], "")).strip()
         if not translated:
             continue
 
-        x, y, w, h = (
-            int(line["x"]), int(line["y"]),
-            int(line["w"]), int(line["h"])
+        x = int(line["x"])
+        y = int(line["y"])
+        w = int(line["w"])
+        h = int(line["h"])
+
+        if w < 12 or h < 10:
+            continue
+        if x < 0 or y < 0 or x + w > image.width or y + h > image.height:
+            continue
+
+        # A caixa deve representar o interior do balão, não apenas as letras.
+        # Margem proporcional para preservar bordas.
+        inset_x = max(2, int(w * 0.07))
+        inset_y = max(2, int(h * 0.07))
+        left, top = x + inset_x, y + inset_y
+        right, bottom = x + w - inset_x, y + h - inset_y
+
+        area_w = right - left
+        area_h = bottom - top
+        if area_w < 8 or area_h < 8:
+            continue
+
+        # Evita apagar áreas gigantescas causadas por coordenadas incorretas.
+        if w > image.width * 0.65 or h > image.height * 0.45:
+            continue
+
+        # Usa cantos arredondados para reduzir a chance de cobrir arte
+        # nos cantos. A caixa precisa ter sido identificada pelo Gemini.
+        radius = max(2, min(area_w, area_h) // 8)
+        draw.rounded_rectangle(
+            (left, top, right, bottom),
+            radius=radius,
+            fill="white"
         )
 
-        x = max(0, min(image.width - 1, x))
-        y = max(0, min(image.height - 1, y))
-        w = max(1, min(image.width - x, w))
-        h = max(1, min(image.height - y, h))
-
-        # Limpa apenas o interior detectado, preservando as bordas externas.
-        inset = max(1, min(3, int(min(w, h) * 0.025)))
-        left = min(x + inset, image.width - 1)
-        top = min(y + inset, image.height - 1)
-        right = max(left + 1, min(image.width, x + w - inset))
-        bottom = max(top + 1, min(image.height, y + h - inset))
-        draw.rectangle((left, top, right, bottom), fill="white")
-
-        area_w = max(1, right - left)
-        area_h = max(1, bottom - top)
         font, rows, line_height, max_width, max_height = fit_font(
             draw, translated, area_w, area_h
         )
 
-        # Centraliza o bloco vertical e horizontalmente.
+        # Não descarta silenciosamente palavras: só desenha linhas que cabem.
         valid_rows = []
         for row in rows:
-            if draw.textbbox((0, 0), row, font=font)[2] <= max_width:
+            bbox = draw.textbbox((0, 0), row, font=font)
+            if bbox[2] - bbox[0] <= max_width:
                 valid_rows.append(row)
 
         while valid_rows and len(valid_rows) * line_height > max_height:
-            # Nunca desenha linhas que ultrapassem o balão.
             valid_rows.pop()
 
         if not valid_rows:
             continue
 
-        block_h = len(valid_rows) * line_height
-        start_y = top + max(0, (area_h - block_h) // 2)
+        total_h = len(valid_rows) * line_height
+        start_y = top + max(0, (area_h - total_h) // 2)
 
         for index, row in enumerate(valid_rows):
             bbox = draw.textbbox((0, 0), row, font=font)
@@ -855,6 +869,8 @@ def render_page(image, lines, translations):
             draw_x = left + max(0, (area_w - row_w) // 2)
             draw_y = start_y + index * line_height
 
+            if draw_x < left or draw_x + row_w > right:
+                continue
             if draw_y + line_height > bottom:
                 break
 
@@ -866,6 +882,7 @@ def render_page(image, lines, translations):
             )
 
     return image
+
 
 
 
@@ -1016,9 +1033,16 @@ Regras:
 - Não traduza logotipos, nomes de editoras nem nomes próprios.
 - Cada região deve corresponder a um texto separado.
 - Não junte falas de balões diferentes.
-- Para cada fala, box deve delimitar a área INTERNA utilizável do balão inteiro, incluindo espaço vazio para a tradução, sem incluir a borda preta, o bico do balão ou desenhos externos. Não delimite somente as letras originais. Para caixas de narração, delimite o interior da caixa. Se não conseguir identificar uma área segura, omita essa região em vez de inventar coordenadas.
+- Identifique DUAS caixas independentes para cada fala:
+  1. text_box: caixa apertada ao redor das letras originais.
+  2. bubble_box: somente a área INTERNA utilizável do balão ou caixa de narração, sem bordas, bico ou desenhos externos.
 - As coordenadas devem ser números normalizados de 0 a 1000:
-  [x, y, largura, altura], medidos desde o canto superior esquerdo.
+  [x, y, largura, altura], desde o canto superior esquerdo.
+- A bubble_box deve conter a text_box, mas não pode incluir desenhos externos.
+- Não use uma caixa enorme para abranger vários balões.
+- Cada balão deve ter sua própria região e tradução.
+- Se não conseguir localizar com confiança o interior do balão, omita a região.
+- Confira cuidadosamente a posição horizontal e vertical de cada caixa na imagem original.
 - Se não houver texto traduzível, retorne uma lista vazia.
 - Não inclua comentários, Markdown nem texto fora do JSON.
 
@@ -1031,7 +1055,8 @@ Retorne exatamente esta estrutura JSON:
     {
       "text": "texto original legível",
       "translation": "tradução brasileira",
-      "box": [120, 220, 260, 130]
+      "text_box": [150, 250, 100, 35],
+      "bubble_box": [120, 220, 260, 130]
     }
   ]
 }
@@ -1108,21 +1133,48 @@ Retorne exatamente esta estrutura JSON:
     for region in parsed.get("regions", []):
         text = str(region.get("text", "")).strip()
         translation = str(region.get("translation", "")).strip()
-        box = region.get("box", [])
+        bubble_box = region.get("bubble_box")
+        text_box = region.get("text_box")
 
-        if not text or not translation or not isinstance(box, list) or len(box) != 4:
+        if not text or not translation:
+            continue
+        if not isinstance(bubble_box, list) or len(bubble_box) != 4:
+            # Não apaga nem desenha usando uma caixa ambígua.
+            continue
+        if not isinstance(text_box, list) or len(text_box) != 4:
             continue
 
         try:
-            bx, by, bw, bh = [float(value) for value in box]
+            bx, by, bw, bh = [float(value) for value in bubble_box]
+            tx, ty, tw, th = [float(value) for value in text_box]
         except (ValueError, TypeError):
             continue
 
-        # Coordenadas normalizadas para pixels da imagem original.
-        x = max(0, min(width - 1, round(bx * width / 1000)))
-        y = max(0, min(height - 1, round(by * height / 1000)))
-        w = max(1, min(width - x, round(bw * width / 1000)))
-        h = max(1, min(height - y, round(bh * height / 1000)))
+        # Rejeita valores fora da escala normalizada.
+        if any(v < 0 or v > 1000 for v in (bx, by, tx, ty)):
+            continue
+        if any(v <= 0 or v > 1000 for v in (bw, bh, tw, th)):
+            continue
+
+        # A caixa do texto deve estar dentro ou muito próxima do balão.
+        if tx < bx - 20 or ty < by - 20:
+            continue
+        if tx + tw > bx + bw + 20 or ty + th > by + bh + 20:
+            continue
+
+        # Rejeita caixas desproporcionais que provavelmente estão erradas.
+        if bw > 700 or bh > 600 or bw < 15 or bh < 12:
+            continue
+
+        # Converte a caixa interna do balão para pixels.
+        x = round(bx * width / 1000)
+        y = round(by * height / 1000)
+        w = round(bw * width / 1000)
+        h = round(bh * height / 1000)
+
+        # Rejeita caixas fora da página em vez de deslocá-las para a borda.
+        if x < 0 or y < 0 or x + w > width or y + h > height:
+            continue
 
         item_id = len(lines) + 1
         lines.append({
