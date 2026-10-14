@@ -764,72 +764,109 @@ def _wrap_text(draw, text, font, max_width):
     return rows or [""]
 
 
+
 def fit_font(draw, text, width, height):
-    """Procura uma fonte que acomode o texto na caixa estimada."""
+    """Ajusta a fonte para caber dentro da área disponível."""
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     if not os.path.exists(font_path):
-        font_path = (
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"
-        )
+        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"
 
-    max_width = max(int(width * 2), 30)
-    max_height = max(int(height * 2), 24)
-    initial_size = min(22, max(8, int(height * 1.4)))
+    width = max(1, int(width))
+    height = max(1, int(height))
+    max_width = max(1, int(width * 0.90))
+    max_height = max(1, int(height * 0.90))
+    initial_size = max(6, min(22, int(height * 0.65)))
 
-    for size in range(initial_size, 6, -1):
+    for size in range(initial_size, 5, -1):
         font = ImageFont.truetype(font_path, size)
         rows = _wrap_text(draw, text, font, max_width)
-        line_height = max(9, int(size * 1.25))
+        line_height = max(7, int(size * 1.20))
+        if rows and len(rows) * line_height <= max_height:
+            if all(
+                draw.textbbox((0, 0), row, font=font)[2]
+                <= max_width
+                for row in rows
+            ):
+                return font, rows, line_height, max_width, max_height
 
-        if len(rows) * line_height <= max_height:
-            return font, rows, line_height, max_width, max_height
-
-    font = ImageFont.truetype(font_path, 7)
+    font = ImageFont.truetype(font_path, 6)
     rows = _wrap_text(draw, text, font, max_width)
-    return font, rows, 9, max_width, max_height
+    line_height = 7
+    return font, rows, line_height, max_width, max_height
+
+
 
 
 def render_page(image, lines, translations):
+    """Desenha cada tradução dentro da área detectada, sem ampliar a caixa."""
     image = image.copy().convert("RGB")
     draw = ImageDraw.Draw(image)
 
+    # As caixas recebidas do Gemini devem representar a área interna
+    # do balão ou da caixa de narração, e não somente as letras originais.
     for line in lines:
-        translated = translations.get(line["id"], "").strip()
+        translated = str(translations.get(line["id"], "")).strip()
         if not translated:
             continue
 
         x, y, w, h = (
-            line["x"], line["y"], line["w"], line["h"]
-        )
-        pad = 3
-
-        draw.rectangle(
-            (
-                max(0, x - pad),
-                max(0, y - pad),
-                min(image.width, x + w + pad),
-                min(image.height, y + h + pad),
-            ),
-            fill="white",
+            int(line["x"]), int(line["y"]),
+            int(line["w"]), int(line["h"])
         )
 
+        x = max(0, min(image.width - 1, x))
+        y = max(0, min(image.height - 1, y))
+        w = max(1, min(image.width - x, w))
+        h = max(1, min(image.height - y, h))
+
+        # Limpa apenas o interior detectado, preservando as bordas externas.
+        inset = max(1, min(3, int(min(w, h) * 0.025)))
+        left = min(x + inset, image.width - 1)
+        top = min(y + inset, image.height - 1)
+        right = max(left + 1, min(image.width, x + w - inset))
+        bottom = max(top + 1, min(image.height, y + h - inset))
+        draw.rectangle((left, top, right, bottom), fill="white")
+
+        area_w = max(1, right - left)
+        area_h = max(1, bottom - top)
         font, rows, line_height, max_width, max_height = fit_font(
-            draw, translated, w, h
+            draw, translated, area_w, area_h
         )
 
-        # Desenha todas as linhas que cabem no espaço estimado.
-        for index, row in enumerate(rows):
-            row_width = draw.textbbox((0, 0), row, font=font)[2]
-            draw_y = y + index * line_height
+        # Centraliza o bloco vertical e horizontalmente.
+        valid_rows = []
+        for row in rows:
+            if draw.textbbox((0, 0), row, font=font)[2] <= max_width:
+                valid_rows.append(row)
 
-            if row_width > max_width:
-                continue
-            if draw_y + line_height > y + max_height:
+        while valid_rows and len(valid_rows) * line_height > max_height:
+            # Nunca desenha linhas que ultrapassem o balão.
+            valid_rows.pop()
+
+        if not valid_rows:
+            continue
+
+        block_h = len(valid_rows) * line_height
+        start_y = top + max(0, (area_h - block_h) // 2)
+
+        for index, row in enumerate(valid_rows):
+            bbox = draw.textbbox((0, 0), row, font=font)
+            row_w = bbox[2] - bbox[0]
+            draw_x = left + max(0, (area_w - row_w) // 2)
+            draw_y = start_y + index * line_height
+
+            if draw_y + line_height > bottom:
                 break
 
-            draw.text((x, draw_y), row, fill="black", font=font)
+            draw.text(
+                (draw_x, draw_y - bbox[1]),
+                row,
+                fill="black",
+                font=font
+            )
 
     return image
+
 
 
 def save_pdf(images, output_path):
@@ -979,7 +1016,7 @@ Regras:
 - Não traduza logotipos, nomes de editoras nem nomes próprios.
 - Cada região deve corresponder a um texto separado.
 - Não junte falas de balões diferentes.
-- Retorne a caixa que envolve o texto original, não a página inteira.
+- Para cada fala, box deve delimitar a área INTERNA utilizável do balão inteiro, incluindo espaço vazio para a tradução, sem incluir a borda preta, o bico do balão ou desenhos externos. Não delimite somente as letras originais. Para caixas de narração, delimite o interior da caixa. Se não conseguir identificar uma área segura, omita essa região em vez de inventar coordenadas.
 - As coordenadas devem ser números normalizados de 0 a 1000:
   [x, y, largura, altura], medidos desde o canto superior esquerdo.
 - Se não houver texto traduzível, retorne uma lista vazia.
@@ -994,7 +1031,7 @@ Retorne exatamente esta estrutura JSON:
     {
       "text": "texto original legível",
       "translation": "tradução brasileira",
-      "box": [100, 200, 300, 100]
+      "box": [120, 220, 260, 130]
     }
   ]
 }

@@ -1,0 +1,269 @@
+===== fit_font (linhas 768-795) =====
+def fit_font(draw, text, width, height):
+    """Ajusta a fonte para caber dentro da área disponível."""
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if not os.path.exists(font_path):
+        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"
+
+    width = max(1, int(width))
+    height = max(1, int(height))
+    max_width = max(1, int(width * 0.90))
+    max_height = max(1, int(height * 0.90))
+    initial_size = max(6, min(22, int(height * 0.65)))
+
+    for size in range(initial_size, 5, -1):
+        font = ImageFont.truetype(font_path, size)
+        rows = _wrap_text(draw, text, font, max_width)
+        line_height = max(7, int(size * 1.20))
+        if rows and len(rows) * line_height <= max_height:
+            if all(
+                draw.textbbox((0, 0), row, font=font)[2]
+                <= max_width
+                for row in rows
+            ):
+                return font, rows, line_height, max_width, max_height
+
+    font = ImageFont.truetype(font_path, 6)
+    rows = _wrap_text(draw, text, font, max_width)
+    line_height = 7
+    return font, rows, line_height, max_width, max_height
+
+===== render_page (linhas 800-868) =====
+def render_page(image, lines, translations):
+    """Desenha cada tradução dentro da área detectada, sem ampliar a caixa."""
+    image = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(image)
+
+    # As caixas recebidas do Gemini devem representar a área interna
+    # do balão ou da caixa de narração, e não somente as letras originais.
+    for line in lines:
+        translated = str(translations.get(line["id"], "")).strip()
+        if not translated:
+            continue
+
+        x, y, w, h = (
+            int(line["x"]), int(line["y"]),
+            int(line["w"]), int(line["h"])
+        )
+
+        x = max(0, min(image.width - 1, x))
+        y = max(0, min(image.height - 1, y))
+        w = max(1, min(image.width - x, w))
+        h = max(1, min(image.height - y, h))
+
+        # Limpa apenas o interior detectado, preservando as bordas externas.
+        inset = max(1, min(3, int(min(w, h) * 0.025)))
+        left = min(x + inset, image.width - 1)
+        top = min(y + inset, image.height - 1)
+        right = max(left + 1, min(image.width, x + w - inset))
+        bottom = max(top + 1, min(image.height, y + h - inset))
+        draw.rectangle((left, top, right, bottom), fill="white")
+
+        area_w = max(1, right - left)
+        area_h = max(1, bottom - top)
+        font, rows, line_height, max_width, max_height = fit_font(
+            draw, translated, area_w, area_h
+        )
+
+        # Centraliza o bloco vertical e horizontalmente.
+        valid_rows = []
+        for row in rows:
+            if draw.textbbox((0, 0), row, font=font)[2] <= max_width:
+                valid_rows.append(row)
+
+        while valid_rows and len(valid_rows) * line_height > max_height:
+            # Nunca desenha linhas que ultrapassem o balão.
+            valid_rows.pop()
+
+        if not valid_rows:
+            continue
+
+        block_h = len(valid_rows) * line_height
+        start_y = top + max(0, (area_h - block_h) // 2)
+
+        for index, row in enumerate(valid_rows):
+            bbox = draw.textbbox((0, 0), row, font=font)
+            row_w = bbox[2] - bbox[0]
+            draw_x = left + max(0, (area_w - row_w) // 2)
+            draw_y = start_y + index * line_height
+
+            if draw_y + line_height > bottom:
+                break
+
+            draw.text(
+                (draw_x, draw_y - bbox[1]),
+                row,
+                fill="black",
+                font=font
+            )
+
+    return image
+
+===== analyze_page_with_gemini (linhas 973-1139) =====
+def analyze_page_with_gemini(image, page_number, context=""):
+    """Reconhece e traduz os textos diretamente da imagem de uma página."""
+    import base64
+    import json
+    import os
+    import re
+    import time
+    import urllib.error
+    import urllib.request
+    from io import BytesIO
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY não está configurada neste terminal."
+        )
+
+    model = "gemini-3.5-flash-lite"
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + model
+        + ":generateContent"
+    )
+
+    # Envia a página inteira, não texto extraído pelo Tesseract.
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=92)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    prompt = """
+Você é um especialista em leitura visual e tradução de mangás.
+Analise a página de imagem enviada e execute as duas tarefas:
+1. Identifique textos legíveis que devam ser traduzidos, especialmente
+   falas dentro de balões e caixas de narração.
+2. Traduza cada texto do inglês para português brasileiro natural.
+
+Regras:
+- Examine a imagem inteira e preserve a ordem de leitura.
+- Não invente palavras que não estejam visíveis.
+- Não inclua letras do cenário, efeitos decorativos ou rabiscos como falas,
+  a menos que sejam texto legível com significado.
+- Preserve nomes de personagens e títulos de obras.
+- Preserve exatamente "Demon Slayer: Kimetsu no Yaiba" e "Kimetsu no Yaiba".
+- Não traduza logotipos, nomes de editoras nem nomes próprios.
+- Cada região deve corresponder a um texto separado.
+- Não junte falas de balões diferentes.
+- Para cada fala, box deve delimitar a área INTERNA utilizável do balão inteiro, incluindo espaço vazio para a tradução, sem incluir a borda preta, o bico do balão ou desenhos externos. Não delimite somente as letras originais. Para caixas de narração, delimite o interior da caixa. Se não conseguir identificar uma área segura, omita essa região em vez de inventar coordenadas.
+- As coordenadas devem ser números normalizados de 0 a 1000:
+  [x, y, largura, altura], medidos desde o canto superior esquerdo.
+- Se não houver texto traduzível, retorne uma lista vazia.
+- Não inclua comentários, Markdown nem texto fora do JSON.
+
+Contexto anterior da história:
+""" + (context[-2000:] if context else "(início da história)") + """
+
+Retorne exatamente esta estrutura JSON:
+{
+  "regions": [
+    {
+      "text": "texto original legível",
+      "translation": "tradução brasileira",
+      "box": [120, 220, 260, 130]
+    }
+  ]
+}
+"""
+
+    request_body = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": encoded
+                    }
+                }
+            ]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.1
+        }
+    }
+
+    payload = json.dumps(request_body).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint + "?key=" + api_key,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    raw = None
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code in (429, 500, 502, 503, 504) and attempt < 4:
+                time.sleep(min(5 * (2 ** attempt), 40))
+                continue
+            raise RuntimeError(
+                f"Gemini falhou na página {page_number} "
+                f"(HTTP {exc.code}): {detail[:1200]}"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt < 4:
+                time.sleep(min(5 * (2 ** attempt), 40))
+                continue
+            raise RuntimeError(
+                f"Falha de conexão com Gemini na página {page_number}: {exc}"
+            ) from exc
+
+    if raw is None:
+        raise RuntimeError(
+            f"Gemini não retornou resultado para a página {page_number}."
+        )
+
+    try:
+        answer = raw["candidates"][0]["content"]["parts"][0]["text"].strip()
+        answer = re.sub(r"^```(?:json)?\s*", "", answer, flags=re.I)
+        answer = re.sub(r"\s*```$", "", answer)
+        parsed = json.loads(answer)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Resposta JSON inválida do Gemini na página {page_number}."
+        ) from exc
+
+    width, height = image.size
+    lines = []
+    translations = {}
+
+    for region in parsed.get("regions", []):
+        text = str(region.get("text", "")).strip()
+        translation = str(region.get("translation", "")).strip()
+        box = region.get("box", [])
+
+        if not text or not translation or not isinstance(box, list) or len(box) != 4:
+            continue
+
+        try:
+            bx, by, bw, bh = [float(value) for value in box]
+        except (ValueError, TypeError):
+            continue
+
+        # Coordenadas normalizadas para pixels da imagem original.
+        x = max(0, min(width - 1, round(bx * width / 1000)))
+        y = max(0, min(height - 1, round(by * height / 1000)))
+        w = max(1, min(width - x, round(bw * width / 1000)))
+        h = max(1, min(height - y, round(bh * height / 1000)))
+
+        item_id = len(lines) + 1
+        lines.append({
+            "id": item_id,
+            "page": page_number,
+            "text": text,
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h
+        })
+        translations[item_id] = translation
+
+    return lines, translations
